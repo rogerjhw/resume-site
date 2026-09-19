@@ -380,9 +380,9 @@
     padding-block: 40px;
   }
   .tool + .tool { border-top: 1px solid var(--line); }
-  .tool + .tool.tool--newsletter { border-top: 0; }
+  .tool + .tool.tool--digest { border-top: 0; }
   .tool.tool--matchup,
-  .tool.tool--newsletter { padding-top: 8px; }
+  .tool.tool--digest { padding-top: 8px; }
   .tool.tool--matchup { padding-bottom: 0; }
 
   @media (max-width: 760px) {
@@ -403,11 +403,11 @@
 
   .tool-media.transparent { background: transparent; }
 
-  .tool-media.newsletter-media { border: 0; border-radius: 0; width: 50%; }
+  .tool-media.digest-media { border: 0; border-radius: 0; width: 50%; }
 
-  @media (max-width: 760px) { .tool-media.newsletter-media { width: 100%; } }
+  @media (max-width: 760px) { .tool-media.digest-media { width: 100%; } }
 
-  .newsletter-embed {
+  .digest-embed {
     max-height: 280px;
     --fade-top: 0px;
     --fade-bottom: 56px;
@@ -418,15 +418,15 @@
     overflow-x: hidden;
   }
 
-  .newsletter-embed::-webkit-scrollbar { display: none; }
+  .digest-embed::-webkit-scrollbar { display: none; }
 
-  .newsletter-stage {
+  .digest-stage {
     position: relative;
     width: 100%;
     min-height: 200px;
   }
 
-  .newsletter-stage iframe {
+  .digest-stage iframe {
     position: absolute;
     top: 0;
     left: 0;
@@ -768,7 +768,7 @@
         Lead creative for socials and ad campaigns. Responsible for shipping assets ranging from memes to professional digital ads.
       </p>
 
-      <div class="carousel" id="ad-carousel">
+      <div class="carousel" id="work-carousel">
         <div class="carousel-stage">
           <div class="carousel-track">
             <button class="carousel-card" type="button" data-caption="Apple link preview for site">
@@ -838,13 +838,13 @@
         </div>
       </div>
 
-      <div class="tool tool--stacked tool--newsletter">
-        <div class="tool-media transparent newsletter-media">
-          <div class="newsletter-embed" id="newsletter-embed">
-            <div class="newsletter-stage" id="newsletter-stage">
+      <div class="tool tool--stacked tool--digest">
+        <div class="tool-media transparent digest-media">
+          <div class="digest-embed" id="digest-embed">
+            <div class="digest-stage" id="digest-stage">
               <iframe
-                id="newsletter-frame"
-                src="assets/tools/newsletter.html"
+                id="digest-frame"
+                src="assets/tools/weekly-digest.html"
                 title="Stakeholder weekly newsletter, rendered live"
                 scrolling="no">
               </iframe>
@@ -911,7 +911,7 @@
 
   <script>
     (function () {
-      var root = document.getElementById('ad-carousel');
+      var root = document.getElementById('work-carousel');
       if (!root) return;
 
       var cards = Array.prototype.slice.call(root.querySelectorAll('.carousel-card'));
@@ -1083,8 +1083,8 @@
 
   <script>
     (function () {
-      var stage = document.getElementById('newsletter-stage');
-      var iframe = document.getElementById('newsletter-frame');
+      var stage = document.getElementById('digest-stage');
+      var iframe = document.getElementById('digest-frame');
       if (!stage || !iframe) return;
 
       var NATIVE_WIDTH = 640;
@@ -1114,14 +1114,14 @@
       // contentDocument is blocked on file:// and cross-origin, so the
       // newsletter also posts its own height up to us.
       window.addEventListener('message', function (e) {
-        if (e.source !== iframe.contentWindow || !e.data || !e.data.newsletterHeight) return;
-        nativeHeight = e.data.newsletterHeight;
+        if (e.source !== iframe.contentWindow || !e.data || !e.data.digestHeight) return;
+        nativeHeight = e.data.digestHeight;
         iframe.style.height = nativeHeight + 'px';
         layout();
       });
 
       // Fade only the edge that still has content beyond it.
-      var embed = document.getElementById('newsletter-embed');
+      var embed = document.getElementById('digest-embed');
       function fades() {
         var max = embed.scrollHeight - embed.clientHeight;
         embed.style.setProperty('--fade-top', Math.min(embed.scrollTop, 56) + 'px');
