@@ -1,0 +1,7 @@
+.DS_Store
+# source/working files, not part of the deployed site
+/photography/
+/ad-assets/
+/HTML-assets copy/
+/site-recordings/
+/Newsletter V3.eml

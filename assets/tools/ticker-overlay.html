@@ -1,0 +1,502 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Stak3holder Ticker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Same type system and palette as the matchup overlay, so the two
+       compose as one visual language rather than two different tools. */
+    --text: #14151a;
+    --text-dim: #6b6b66;
+    --up: #3f8a4b;
+    --down: #c0392b;
+    --sans: "Space Grotesk", -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  /* Transparent background is required for OBS compositing — do not set a color here. */
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+  }
+
+  #ticker-bar {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    height: var(--ticker-height, 64px);
+    background: transparent;
+    display: flex;
+    align-items: center;
+    font-family: var(--sans);
+    box-sizing: border-box;
+  }
+
+
+  #tape-viewport {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  #tape-track {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+    will-change: transform;
+  }
+
+  .conf-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    padding: 0 18px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    color: var(--text);
+    background: rgba(0, 0, 0, 0.05);
+    border-right: 1px solid rgba(0, 0, 0, 0.12);
+    flex: 0 0 auto;
+  }
+  .conf-label img.conf-logo {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+    flex: 0 0 auto;
+  }
+
+  .ticker-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    padding: 0 16px;
+    flex: 0 0 auto;
+    border-right: 1px solid rgba(0, 0, 0, 0.08);
+  }
+
+  .ticker-item img.logo {
+    width: 28px;
+    height: 28px;
+    object-fit: contain;
+    flex: 0 0 auto;
+  }
+  .ticker-item .logo-fallback {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: #e2e5eb;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
+
+  .ticker-item .symbol {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .ticker-item .price {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticker-item .delta {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .ticker-item .delta.up { color: var(--up); }
+  .ticker-item .delta.down { color: var(--down); }
+  .ticker-item .delta.flat { color: var(--text-dim); }
+
+  #debug-panel {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    max-width: 480px;
+    background: rgba(0,0,0,0.85);
+    color: #d8ffea;
+    font: 12px/1.5 ui-monospace, Menlo, monospace;
+    padding: 10px 12px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+    z-index: 10;
+  }
+  #debug-panel .warn { color: #fbbf24; }
+  #debug-panel .err { color: #f87171; }
+</style>
+</head>
+<body>
+
+<div id="ticker-bar">
+  <div id="tape-viewport">
+    <div id="tape-track"></div>
+  </div>
+</div>
+<div id="debug-panel" style="display:none;"></div>
+
+<script>
+/* ============================================================
+   1. CONFIG
+   ============================================================ */
+const qs = new URLSearchParams(location.search);
+
+const CONFIG = {
+  // px/sec scroll speed
+  SPEED: Number(qs.get('speed')) || 70,
+  // "alltime" | "session" — which delta is rendered
+  CHANGE_BASIS: qs.get('basis') === 'session' ? 'session' : 'alltime',
+  // "price" (cheapest first, default) | "symbol"
+  SORT: qs.get('sort') === 'symbol' ? 'symbol' : 'price',
+  // suppress logos, render a fallback badge instead
+  NO_LOGOS: qs.get('nologos') === '1',
+  DEBUG: qs.get('debug') === '1',
+  HEIGHT: qs.get('height') ? `${Number(qs.get('height'))}px` : '64px',
+  ACCENT: qs.get('accent') ? `#${qs.get('accent').replace(/^#/, '')}` : '#22c55e',
+  // optional auth token, kept out of the file per the no-committed-credentials rule —
+  // pass it in the OBS source URL as ?token=... if the indexer ever requires one.
+  TOKEN: qs.get('token') || null,
+
+  REFRESH_MS: 30_000,
+  CONFERENCE_ORDER: ['Big Ten', 'SEC', 'ACC', 'Big 12'],
+  // ESPN's own conference group-logo CDN, keyed by their college-football group IDs
+  // (verified against sports.core.api.espn.com/.../groups/{id} — ACC=1, Big 12=4,
+  // Big Ten=5, SEC=8). Falls back to text-only label if a fetch 404s.
+  CONFERENCE_LOGOS: {
+    'ACC': 'https://a.espncdn.com/i/teamlogos/ncaa_conf/500/1.png',
+    'Big 12': 'https://a.espncdn.com/i/teamlogos/ncaa_conf/500/4.png',
+    'Big Ten': 'https://a.espncdn.com/i/teamlogos/ncaa_conf/500/5.png',
+    'SEC': 'https://a.espncdn.com/i/teamlogos/ncaa_conf/500/8.png',
+  },
+  LOGO_BASE: './logos/',
+  LOGO_EXT: '.png',
+
+  // Stakeholder's own indexer (Cloud Run), not the app's Netlify functions —
+  // see chat-references/ticker-api-wiring.md, section 1/8. Public, keyless.
+  INDEXER_BASE: 'https://stakeholder-indexer-443668892096.us-east4.run.app',
+  CHAIN_ID: 42161,
+  MARKET: 'cfb',
+};
+
+document.documentElement.style.setProperty('--ticker-height', CONFIG.HEIGHT);
+document.documentElement.style.setProperty('--accent', CONFIG.ACCENT);
+
+/* ============================================================
+   TEAM CATALOG — static, embedded at build time
+   ------------------------------------------------------------
+   The /tokens indexer endpoint (see ADAPTER below) returns live price
+   and short-window change data, but NOT an all-time/launch price —
+   the API has no such field (confirmed: changes only cover 1h/24h/7d/3m).
+   The real launch price lives in the Stakeholder app's own bundled
+   config (src/config/cfb-config.json, teams[].markets.cfb.launchPrice),
+   which is inlined into that app's JS at build time and never served
+   over HTTP. Per the task spec ("fetch it once at startup and cache it
+   ... launch prices don't move"), the equivalent here is to embed a
+   static copy of that config, filtered to the four target conferences,
+   and join it against live prices by tokenAddress. This is real,
+   current data copied from the source config — not an invented basis.
+   symbol/conference/logo/tokenAddress are from cfb-config.json;
+   launchPrice is USDC-wei (6 decimals), same units as the API's price.
+   67 of 136 CFB teams fall in Big Ten/SEC/ACC/Big 12.
+   ============================================================ */
+const TEAM_CATALOG = [{"symbol":"AFA","name":"Air Force","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2005.png","primary":"#004a7b","tokenAddress":"0xb3864dbae5a70ccf8ca5eacc56a8263e552ddbcf","launchPrice":200000},{"symbol":"AKR","name":"Akron","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2006.png","primary":"#00285e","tokenAddress":"0x432a9c8de5347f07194847d16d7e824d85f1d03c","launchPrice":50000},{"symbol":"ALA","name":"Alabama","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/333.png","primary":"#9e1632","tokenAddress":"0x7db5eed992dab6c32cbbfd9c0cb1ae704f30ee40","launchPrice":7000000},{"symbol":"APP","name":"App State","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2026.png","primary":"#ffcc00","tokenAddress":"0xd58d907a0e7add783b2d60b07b07723778237c2a","launchPrice":100000},{"symbol":"ARIZ","name":"Arizona","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/12.png","primary":"#0c234b","tokenAddress":"0xd2e6b928acbc0ced432a55bca42f65320d9b546e","launchPrice":1000000},{"symbol":"ASU","name":"Arizona State","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/9.png","primary":"#8e0c3a","tokenAddress":"0xfbe18d7d23d7ced76e3698bbaa6aacc7b97f1e0f","launchPrice":500000},{"symbol":"ARK","name":"Arkansas","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/8.png","primary":"#a41f35","tokenAddress":"0x82004f026b5125a3ddd6ce2236f73b20a62c10ef","launchPrice":1000000},{"symbol":"ARST","name":"Arkansas State","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2032.png","primary":"#e81018","tokenAddress":"0x9cc64fe5c6b3977f2c217d4c891c4dd1c822f9b2","launchPrice":100000},{"symbol":"ARMY","name":"Army","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/349.png","primary":"#ce9c00","tokenAddress":"0x9be8342d13b2073385bf9df53b6219cdf5c2ca04","launchPrice":500000},{"symbol":"AUB","name":"Auburn","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2.png","primary":"#002b5c","tokenAddress":"0x7f5bb8593124b2f1f8dd277417b33f024b50b1ca","launchPrice":1000000},{"symbol":"BALL","name":"Ball State","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2050.png","primary":"#DA0000","tokenAddress":"0x6df3273344af7919c864d9e2e625a101a5d34a47","launchPrice":50000},{"symbol":"BAY","name":"Baylor","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/239.png","primary":"#154734","tokenAddress":"0x847c86ced7a3effe38a032caec98e4d9750b4059","launchPrice":1000000},{"symbol":"BOIS","name":"Boise State","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/68.png","primary":"#0033a0","tokenAddress":"0xd4fe5dff905b77c1992cd8399e86b329e70103aa","launchPrice":1000000},{"symbol":"BC","name":"Boston College","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/103.png","primary":"#8c2232","tokenAddress":"0xb49580433300f6472eced8e85e4fafe55d23ff3d","launchPrice":300000},{"symbol":"BGSU","name":"Bowling Green","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/189.png","primary":"#2b1000","tokenAddress":"0x5def832c3c74b52b1e2b17435773f56c5591487e","launchPrice":50000},{"symbol":"BUF","name":"Buffalo","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2084.png","primary":"#041A9B","tokenAddress":"0xb12ded33ecca8e1a3a56232452ccefb52a2e7909","launchPrice":50000},{"symbol":"BYU","name":"BYU","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/252.png","primary":"#003da5","tokenAddress":"0x362b15b668def5ab8419dfb4904a4df092158baf","launchPrice":2000000},{"symbol":"CAL","name":"California","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/25.png","primary":"#031522","tokenAddress":"0xed2552748b7fe9329afb99211440ec6d55cfc543","launchPrice":300000},{"symbol":"CMU","name":"Central Michigan","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2117.png","primary":"#6a0032","tokenAddress":"0x612ef3c812b23a81e124183a2dbff8217423d248","launchPrice":50000},{"symbol":"CLT","name":"Charlotte","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2429.png","primary":"#046A38","tokenAddress":"0x7feb542630ee3156af13c7dcef2a477d4901064a","launchPrice":50000},{"symbol":"CIN","name":"Cincinnati","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2132.png","primary":"#E00122","tokenAddress":"0x83192eaedc1dbc1ce81cdb1dcaea53a2d9c44c3c","launchPrice":1000000},{"symbol":"CLEM","name":"Clemson","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/228.png","primary":"#f56600","tokenAddress":"0xed133e8e4999993c0b620f2ecf1d79c1d4948eeb","launchPrice":3000000},{"symbol":"CCU","name":"Coastal Carolina","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/324.png","primary":"#007073","tokenAddress":"0x833ba73a522cf7a8982a48b9386a1af83875fcb8","launchPrice":200000},{"symbol":"COLO","name":"Colorado","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/38.png","primary":"#CFB87C","tokenAddress":"0x175ba4d6a8bc3fdacd5b4a5ae7cae905a5fb8136","launchPrice":1000000},{"symbol":"CSU","name":"Colorado State","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/36.png","primary":"#1e4d2b","tokenAddress":"0x88d6a2646e1dff81f909cd648a6008f5783a7b36","launchPrice":100000},{"symbol":"DEL","name":"Delaware","conference":"CAA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/48.png","primary":"#033594","tokenAddress":"0x366cc22f9cb8b5780f6b5e2a200e5a9d5ea71090","launchPrice":50000},{"symbol":"DUKE","name":"Duke","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/150.png","primary":"#013088","tokenAddress":"0xc221cbdb1a6f8fc566395cacc7fb7d405834c6bf","launchPrice":300000},{"symbol":"ECU","name":"East Carolina","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/151.png","primary":"#4b1869","tokenAddress":"0xe89cb0e78a625cff5b2975ae0a405a5678c19f3f","launchPrice":50000},{"symbol":"EMU","name":"Eastern Michigan","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2199.png","primary":"#00331b","tokenAddress":"0xb0270ac6ee84d8eed2f3db5acf8a953b14b6284a","launchPrice":50000},{"symbol":"FLA","name":"Florida","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/57.png","primary":"#0021a5","tokenAddress":"0xb7511dd3b360ac4a1f179ff8d9363befa13f1e2f","launchPrice":1000000},{"symbol":"FAU","name":"Florida Atlantic","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2226.png","primary":"#00447c","tokenAddress":"0x2425730dbffe6fab73cdd8e5c5841d74a52a118e","launchPrice":50000},{"symbol":"FIU","name":"Florida International","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2229.png","primary":"#001538","tokenAddress":"0x7feeb69233b487f5488ca90654339e0805694238","launchPrice":100000},{"symbol":"FSU","name":"Florida State","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/52.png","primary":"#782f40","tokenAddress":"0x67f1da5205860be6da99c31e113781f11a3a9a27","launchPrice":2000000},{"symbol":"FRES","name":"Fresno State","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/278.png","primary":"#db0032","tokenAddress":"0x270ed13771b44cca4ee39452c2b2b429038af11d","launchPrice":300000},{"symbol":"UGA","name":"Georgia","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/61.png","primary":"#ba0c2f","tokenAddress":"0x443c483b51d2141dbade91a94bb86d3c93630e1a","launchPrice":7000000},{"symbol":"GASO","name":"Georgia Southern","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/290.png","primary":"#003775","tokenAddress":"0x57a8b9e257f1b711bee045717819246122032aa1","launchPrice":50000},{"symbol":"GAST","name":"Georgia State","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2247.png","primary":"#1e539a","tokenAddress":"0x6fd20c8dffe1edba0733f9508aa49bc028490bf0","launchPrice":50000},{"symbol":"GT","name":"Georgia Tech","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/59.png","primary":"#003057","tokenAddress":"0x20831b07e613645c1b05039f78b301e4a878f3d8","launchPrice":1000000},{"symbol":"HAW","name":"Hawai'i","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/62.png","primary":"#003420","tokenAddress":"0x3864408d103688d585e952f1912b5a3e93dbd81f","launchPrice":50000},{"symbol":"HOU","name":"Houston","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/248.png","primary":"#c92a39","tokenAddress":"0xbbdff2014eb087ee004d27ae7c34b4d587b9700e","launchPrice":500000},{"symbol":"ILL","name":"Illinois","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/356.png","primary":"#ff5f05","tokenAddress":"0xab2c30a01f22e17ffea8accc7401efb45adddb24","launchPrice":1000000},{"symbol":"IU","name":"Indiana","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/84.png","primary":"#990000","tokenAddress":"0x41019908a886508c972a87b42ffc71bddea123d1","launchPrice":2000000},{"symbol":"IOWA","name":"Iowa","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500-dark/2294.png","primary":"#FFCD00","tokenAddress":"0xe0379a67b3797559fdb35ce4c80e4854aaaeda3f","launchPrice":1000000},{"symbol":"ISU","name":"Iowa State","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/66.png","primary":"#822433","tokenAddress":"0x445cc93237ba5dd414c94fe78f095cd15f020e8a","launchPrice":2000000},{"symbol":"JVST","name":"Jacksonville State","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/55.png","primary":"#b50500","tokenAddress":"0x2d2ba10888cc4fca4074e513aec2fdfc88af54f8","launchPrice":100000},{"symbol":"JMU","name":"James Madison","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/256.png","primary":"#450084","tokenAddress":"0x68b7a6b10a09343fc65bd8a36075d81e65d4a323","launchPrice":100000},{"symbol":"KU","name":"Kansas","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2305.png","primary":"#0051ba","tokenAddress":"0xa36518787bb00d8f22156e99940bebed92ae46b1","launchPrice":500000},{"symbol":"KSU","name":"Kansas State","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2306.png","primary":"#3c0969","tokenAddress":"0x33f59a916e1dcedad9f66ed07d89974ae6b13d17","launchPrice":2000000},{"symbol":"KENN","name":"Kennesaw State","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/338.png","primary":"#fdbb30","tokenAddress":"0x152a9653986d1b50d3ffe793d4b09d4148f944c4","launchPrice":50000},{"symbol":"KENT","name":"Kent State","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2309.png","primary":"#003976","tokenAddress":"0x35fc6f9891c2498ed94caadb6d36c796d70aa7d5","launchPrice":50000},{"symbol":"UK","name":"Kentucky","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/96.png","primary":"#0033a0","tokenAddress":"0x111f740a96d4388950b76b3c8f0e9ec803f32f74","launchPrice":1000000},{"symbol":"LIB","name":"Liberty","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2335.png","primary":"#071740","tokenAddress":"0x03fe9e51ee8a5638af54334c95f7020366403b26","launchPrice":200000},{"symbol":"UL","name":"Louisiana","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/309.png","primary":"#ce181e","tokenAddress":"0x25b4052d1069d7c5c02f99116c9220aab0d4c508","launchPrice":300000},{"symbol":"LT","name":"Louisiana Tech","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2348.png","primary":"#002d65","tokenAddress":"0xfb4d066bd50a8801ab1fe36d495d0056450c4ce1","launchPrice":100000},{"symbol":"LOU","name":"Louisville","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/97.png","primary":"#c9001f","tokenAddress":"0xe399896f7a46b002665b7e7cb4968d9568a19944","launchPrice":1000000},{"symbol":"LSU","name":"LSU","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/99.png","primary":"#461d7c","tokenAddress":"0x0bcf37414e1fe05408fdbce5cb123e4f3c885810","launchPrice":4000000},{"symbol":"MRSH","name":"Marshall","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/276.png","primary":"#00ae42","tokenAddress":"0xd17c2ef03795266c77993f6df165c6addb35bd49","launchPrice":50000},{"symbol":"MD","name":"Maryland","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/120.png","primary":"#D5002B","tokenAddress":"0x1064f1b4e1926a0a31cb617c9d2364e072feb5c9","launchPrice":500000},{"symbol":"MASS","name":"Massachusetts","conference":"FBS Independents","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/113.png","primary":"#971B2F","tokenAddress":"0x0a3b5c2e59118e9bad47c4a7d455d5ad6ff80e03","launchPrice":500000},{"symbol":"MEM","name":"Memphis","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/235.png","primary":"#004991","tokenAddress":"0x41608a11c9bcc4a882bbedd66a99c9bee59f5f09","launchPrice":200000},{"symbol":"MIA","name":"Miami","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2390.png","primary":"#005030","tokenAddress":"0x0abbd181ecca7c9d973b64785d0fca18f48061a7","launchPrice":3000000},{"symbol":"M-OH","name":"Miami (OH)","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/193.png","primary":"#a4000c","tokenAddress":"0x982f217a1c910267a9a9236fd0d1e18e480b8fb7","launchPrice":100000},{"symbol":"MICH","name":"Michigan","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/130.png","primary":"#00274c","tokenAddress":"0xbcc383ac79da285f020e05837453da65b2706c38","launchPrice":4000000},{"symbol":"MSU","name":"Michigan State","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/127.png","primary":"#18453b","tokenAddress":"0x74bd029757fa6bf4e41940ab7a2ce1c630687896","launchPrice":1000000},{"symbol":"MTSU","name":"Middle Tennessee","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2393.png","primary":"#006db6","tokenAddress":"0x22da2a689058d9d6ce12516adc23e40bc200d6de","launchPrice":50000},{"symbol":"MINN","name":"Minnesota","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/135.png","primary":"#5e0a2f","tokenAddress":"0x56fab796b697ebc02e394e1054f10e0f332748f7","launchPrice":500000},{"symbol":"MSST","name":"Mississippi State","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/344.png","primary":"#5d1725","tokenAddress":"0x9089e54062e0fe23f8828642c826501964beaa83","launchPrice":1000000},{"symbol":"MIZ","name":"Missouri","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/142.png","primary":"#f1b82d","tokenAddress":"0x41203e9e8dd1d6bd273c19177e0269a9cffe1e7e","launchPrice":3000000},{"symbol":"MOST","name":"Missouri State","conference":"MVFC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2623.png","primary":"#5F0000","tokenAddress":"0xa3f5d2ba52f7cf42047bbb78c7118289f4281754","launchPrice":50000},{"symbol":"NAVY","name":"Navy","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2426.png","primary":"#00225b","tokenAddress":"0x303fc8e9ee4827e7397bd7bcfb893667c1a0d0f0","launchPrice":200000},{"symbol":"NCSU","name":"NC State","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/152.png","primary":"#cc0000","tokenAddress":"0xc46a77f7f77674d4e354f15ebb8f1d03b738c438","launchPrice":1000000},{"symbol":"NEB","name":"Nebraska","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/158.png","primary":"#d00000","tokenAddress":"0xb0eaca626f8de07f3d12afaa4163e6e4fdc8bfcd","launchPrice":500000},{"symbol":"NEV","name":"Nevada","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2440.png","primary":"#002d62","tokenAddress":"0x40da5f41ebf973f9bf4ac731c07df376a4217bf0","launchPrice":100000},{"symbol":"UNM","name":"New Mexico","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/167.png","primary":"#BA0C2F","tokenAddress":"0x95244221fbca4e779559a5a990ec0dc46297bfbf","launchPrice":200000},{"symbol":"NMSU","name":"New Mexico State","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/166.png","primary":"#891216","tokenAddress":"0x20f8b664f51196a7c579b6297f39b853f599ecb9","launchPrice":50000},{"symbol":"UNC","name":"North Carolina","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/153.png","primary":"#7bafd4","tokenAddress":"0x2fa68e884ad4f957f75ff9a74eb5f76c25086710","launchPrice":400000},{"symbol":"UNT","name":"North Texas","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/249.png","primary":"#00853E","tokenAddress":"0xcd300603019468e31b9b81cdd4d7d45c951df314","launchPrice":100000},{"symbol":"NIU","name":"Northern Illinois","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2459.png","primary":"#F1122C","tokenAddress":"0x61694b90ae3877a006d91936b5a23616f6d3463d","launchPrice":100000},{"symbol":"NU","name":"Northwestern","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/77.png","primary":"#582c83","tokenAddress":"0xab1e2a912461ed12b07317ff587f4541dda2a801","launchPrice":500000},{"symbol":"ND","name":"Notre Dame","conference":"FBS Independents","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/87.png","primary":"#0c2340","tokenAddress":"0x8625276f144484a998523e06268ea5e236cff4a9","launchPrice":5000000},{"symbol":"OHIO","name":"Ohio","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/195.png","primary":"#295A29","tokenAddress":"0x15b6bd09a30b242f1f380d2832aedcf738accfd8","launchPrice":50000},{"symbol":"OSU","name":"Ohio State","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/194.png","primary":"#ce1141","tokenAddress":"0x5296c96824d32c263dfa4a69c4549a6bd88666b8","launchPrice":7000000},{"symbol":"OU","name":"Oklahoma","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/201.png","primary":"#a32036","tokenAddress":"0xa1e3d035e20f04173cdd1ab6887a5d25970b598a","launchPrice":2000000},{"symbol":"OKST","name":"Oklahoma State","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/197.png","primary":"#FF7300","tokenAddress":"0x54442dd1fc9b2f0b11d8335ae4731916b56d07b6","launchPrice":2000000},{"symbol":"ODU","name":"Old Dominion","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/295.png","primary":"#00507d","tokenAddress":"0x67a88e12dfbe92142a9f5dc8edbbb6134b2c1031","launchPrice":50000},{"symbol":"MISS","name":"Ole Miss","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/145.png","primary":"#13294b","tokenAddress":"0x5115f7d87ad5f4996933261c06ec1eb93831d712","launchPrice":5000000},{"symbol":"ORE","name":"Oregon","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2483.png","primary":"#007030","tokenAddress":"0x76c7428979a77c4eac817029862063e34b1c61c3","launchPrice":7000000},{"symbol":"ORST","name":"Oregon State","conference":"Pac-12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/204.png","primary":"#231f20","tokenAddress":"0x1567a0245304272436b38affcdc8385563b40b90","launchPrice":1000000},{"symbol":"PSU","name":"Penn State","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/213.png","primary":"#041E42","tokenAddress":"0xd9897ebcfa1323da92a9b36222bf69b04e3abfcf","launchPrice":5000000},{"symbol":"PITT","name":"Pittsburgh","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/221.png","primary":"#003263","tokenAddress":"0x0d7b7911537449ed4e862b93347cae657dd72945","launchPrice":1000000},{"symbol":"PUR","name":"Purdue","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2509.png","primary":"#000000","tokenAddress":"0x44c668a3e839210dd6863700909de8e901d2ffa2","launchPrice":300000},{"symbol":"RICE","name":"Rice","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/242.png","primary":"#d1d5d8","tokenAddress":"0xe47fb11d457892485a01e8d728f1ba09fa3965d4","launchPrice":100000},{"symbol":"RUTG","name":"Rutgers","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/164.png","primary":"#d21034","tokenAddress":"0x5f078900575b87e2e42509c23e9c3bfdf94c8a58","launchPrice":400000},{"symbol":"SHSU","name":"Sam Houston","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2534.png","primary":"#fe5000","tokenAddress":"0x2214b05267eb157d716db63254f2573f9beda152","launchPrice":200000},{"symbol":"SDSU","name":"San Diego State","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/21.png","primary":"#c41230","tokenAddress":"0xfce7e648d39bf6fa402f17fdb519b9bf899af4e1","launchPrice":200000},{"symbol":"SJSU","name":"San Jos\u00e9 State","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/23.png","primary":"#005893","tokenAddress":"0x1d9f320f983c76d61273a8654b9426190a4dba22","launchPrice":50000},{"symbol":"SMU","name":"SMU","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2567.png","primary":"#354ca1","tokenAddress":"0x477021593b572cb9ed7dcdaede50d58817347bbe","launchPrice":2000000},{"symbol":"USA","name":"South Alabama","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/6.png","primary":"#00205B","tokenAddress":"0xd03b017198e214b9f8ec3c82cf4719592d2a0e01","launchPrice":50000},{"symbol":"SC","name":"South Carolina","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2579.png","primary":"#73000a","tokenAddress":"0x8f214767d249a3fbf5bb5ca79470435fece1f1f8","launchPrice":1000000},{"symbol":"USF","name":"South Florida","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/58.png","primary":"#004A36","tokenAddress":"0xa6f142912851e759e3eb0cb09c83e1268fc3990c","launchPrice":50000},{"symbol":"USM","name":"Southern Miss","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2572.png","primary":"#FFAA3C","tokenAddress":"0xd6df9ab2f4280d9ca2f126fd9a8ba34b4bd9ce6e","launchPrice":50000},{"symbol":"STAN","name":"Stanford","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/24.png","primary":"#8c1515","tokenAddress":"0x2719f14faf0006551be52ee8ef3683a089a18bef","launchPrice":200000},{"symbol":"SYR","name":"Syracuse","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/183.png","primary":"#ff6500","tokenAddress":"0x0ed66b0b546534b6df6237a11942894f6c821b06","launchPrice":300000},{"symbol":"TCU","name":"TCU","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2628.png","primary":"#4d1979","tokenAddress":"0x7c1c1d71e55126568ca5f6b2050b58a34fbedd53","launchPrice":1000000},{"symbol":"TEM","name":"Temple","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/218.png","primary":"#A80532","tokenAddress":"0x78a96ab94cc76f299df454671e09c2585ec860aa","launchPrice":100000},{"symbol":"TENN","name":"Tennessee","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2633.png","primary":"#ff8200","tokenAddress":"0x67f71bfbe30401e347034e43d9afb84b7686fa13","launchPrice":5000000},{"symbol":"TEX","name":"Texas","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/251.png","primary":"#c15d26","tokenAddress":"0x76e599eea17d11f115301549d417c6dd1296486e","launchPrice":7000000},{"symbol":"TA&M","name":"Texas A&M","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/245.png","primary":"#500000","tokenAddress":"0xa5179cf9d8264bf95a4d99d9b65d9008ef8ae73f","launchPrice":2000000},{"symbol":"TXST","name":"Texas State","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/326.png","primary":"#4e1719","tokenAddress":"0xe829122a5bb47d574891b8f9884734aee0c1a6b1","launchPrice":100000},{"symbol":"TTU","name":"Texas Tech","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2641.png","primary":"#CC0000","tokenAddress":"0x2b5089952b8c1da607fb7384b534edc1ad11706d","launchPrice":200000},{"symbol":"TOL","name":"Toledo","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2649.png","primary":"#0a2240","tokenAddress":"0x9c8e7eed2aafed30dec4977a07b2e1b46bd8e0b7","launchPrice":50000},{"symbol":"TROY","name":"Troy","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2653.png","primary":"#AE0210","tokenAddress":"0x1d9e4371cf0834ac356d388b59e9758959f06c60","launchPrice":300000},{"symbol":"TULN","name":"Tulane","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2655.png","primary":"#006547","tokenAddress":"0xad3bb4e653f87670e93b798c1cade3b9e7744a6a","launchPrice":1000000},{"symbol":"TLSA","name":"Tulsa","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/202.png","primary":"#003595","tokenAddress":"0x382b3f91f1a6e88df10fc9f103f37170dfe7619f","launchPrice":50000},{"symbol":"UAB","name":"UAB","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/5.png","primary":"#003b28","tokenAddress":"0xf4cfaccfa643a5759b122e00bac6910af9f6f04c","launchPrice":50000},{"symbol":"UCF","name":"UCF","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2116.png","primary":"#ba9b37","tokenAddress":"0xe07f2449e24c79d493c90288a38d0e0427ecda65","launchPrice":300000},{"symbol":"UCLA","name":"UCLA","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/26.png","primary":"#2774ae","tokenAddress":"0xe52c19930379d890ed05c458213c8f6695f5a791","launchPrice":1000000},{"symbol":"CONN","name":"UConn","conference":"FBS Independents","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/41.png","primary":"#0c2340","tokenAddress":"0x300e5746ac266b7878bfa6f8c7444c0a68cf8488","launchPrice":500000},{"symbol":"ULM","name":"UL Monroe","conference":"Sun Belt","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2433.png","primary":"#231F20","tokenAddress":"0x88fac539c6044acde0d36d9a19ed98292df7d7bf","launchPrice":50000},{"symbol":"UNLV","name":"UNLV","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2439.png","primary":"#b10202","tokenAddress":"0x0f277942fe89fd995e8d7fbd26cfd9d527d59dd1","launchPrice":200000},{"symbol":"USC","name":"USC","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/30.png","primary":"#9e2237","tokenAddress":"0xdbbff4414411e10adf7654b615223b3a936af6b8","launchPrice":2000000},{"symbol":"UTAH","name":"Utah","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/254.png","primary":"#ea002a","tokenAddress":"0xbb3ebbda295fbdca2dff28bcd21fdad957a56d01","launchPrice":2000000},{"symbol":"USU","name":"Utah State","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/328.png","primary":"#00263a","tokenAddress":"0x65911661811a1dd6502cc964c2c64eff8a966fa7","launchPrice":200000},{"symbol":"UTEP","name":"UTEP","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2638.png","primary":"#ff8200","tokenAddress":"0x4d00561b2a85a6250e467eaae6d73dceee8cd468","launchPrice":100000},{"symbol":"UTSA","name":"UTSA","conference":"American Athletic","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2636.png","primary":"#002A5C","tokenAddress":"0x3feb35863503d9404ada2b491bb11a86b13d4971","launchPrice":200000},{"symbol":"VAN","name":"Vanderbilt","conference":"SEC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/238.png","primary":"#866d4b","tokenAddress":"0xdd53d9aaa9f920dea351aa5496baeafd96af7fa2","launchPrice":1000000},{"symbol":"UVA","name":"Virginia","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/258.png","primary":"#232d4b","tokenAddress":"0x28b1ff6dc1abd5ff8222dcbca718fe78d4f25ac4","launchPrice":300000},{"symbol":"VT","name":"Virginia Tech","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/259.png","primary":"#630031","tokenAddress":"0x6d7d37abaf054e72709b6ffeeb91d16622df5b30","launchPrice":300000},{"symbol":"WAKE","name":"Wake Forest","conference":"ACC","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/154.png","primary":"#9E7E38","tokenAddress":"0x155eea2b0abd24fafe60752e35456b5c37a0df18","launchPrice":500000},{"symbol":"WASH","name":"Washington","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/264.png","primary":"#33006f","tokenAddress":"0x3fea0ee2f1d55b6a739dedd30b6f654e3593f974","launchPrice":2000000},{"symbol":"WSU","name":"Washington State","conference":"Pac-12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/265.png","primary":"#981e32","tokenAddress":"0x8837551ad3165b42510ef021759defdd3e260bf7","launchPrice":500000},{"symbol":"WVU","name":"West Virginia","conference":"Big 12","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/277.png","primary":"#002855","tokenAddress":"0xfbbb3da2bc9cda2a0e28142ff07c887d9d8a2f7b","launchPrice":200000},{"symbol":"WKU","name":"Western Kentucky","conference":"Conference USA","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/98.png","primary":"#F32026","tokenAddress":"0xc629832c436ecdd912e9958c54b0820963bddcdd","launchPrice":50000},{"symbol":"WMU","name":"Western Michigan","conference":"Mid-American","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2711.png","primary":"#532e1f","tokenAddress":"0xc9be68e1179a48d419236115b8336fa4755b8437","launchPrice":50000},{"symbol":"WIS","name":"Wisconsin","conference":"Big Ten","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/275.png","primary":"#c4012f","tokenAddress":"0x4f961811cb251d4e9493af756323dc9c32d8899e","launchPrice":1000000},{"symbol":"WYO","name":"Wyoming","conference":"Mountain West","logo":"https://a.espncdn.com/i/teamlogos/ncaa/500/2751.png","primary":"#492f24","tokenAddress":"0xc1b09e5d5eb09fc6901400a25e39bb601272fc31","launchPrice":50000}];
+
+// Normalize once at load: keyed by tokenAddress (lowercased, as the API returns it).
+const TEAM_BY_ADDRESS = new Map(TEAM_CATALOG.map(t => [t.tokenAddress.toLowerCase(), t]));
+
+// Normalizes conference string variants to the canonical CONFERENCE_ORDER strings.
+// Currently a no-op against real data (cfb-config.json already uses the canonical
+// strings verbatim — no "B1G" / "Big 10" variants exist) but kept per the spec so
+// the adapter degrades gracefully if the catalog is ever regenerated differently.
+function normalizeConference(raw) {
+  if (!raw) return raw;
+  const map = {
+    'b1g': 'Big Ten', 'big 10': 'Big Ten',
+    'sec': 'SEC',
+    'acc': 'ACC',
+    'big12': 'Big 12', 'big 12': 'Big 12',
+  };
+  return map[raw.trim().toLowerCase()] || raw;
+}
+
+/* ============================================================
+   2. ADAPTER
+   ------------------------------------------------------------
+   Maps a raw /tokens response (see stakeholderIndexerApi.ts /
+   TokensResponseSchema) to the shape the ticker renders:
+   { symbol, price, conference, logo, allTimeChange }.
+
+   Real endpoint: GET {INDEXER_BASE}/tokens?chainId=42161&limit=200&offset=0&market=cfb
+   Auth: none — this route takes no header/token (verified against the
+   app's own axios client, which sends none). Not paginated in practice:
+   the app always requests all teams for a market in one call.
+   Field names below (price, address, market, changes) are the real
+   TokenWithChangesSchema fields, not a guess.
+   ============================================================ */
+function mapApiResponse(json) {
+  const tokens = Array.isArray(json?.tokens) ? json.tokens : [];
+  const out = [];
+
+  for (const tok of tokens) {
+    const address = String(tok.address || '').toLowerCase();
+    const team = TEAM_BY_ADDRESS.get(address);
+    if (!team) continue; // not one of the four target conferences, or unknown token
+
+    const price = Number(tok.price) / 1e6; // USDC wei, 6 decimals
+    if (!Number.isFinite(price)) continue;
+
+    const basePrice = team.launchPrice / 1e6;
+    const allTimeChange = basePrice > 0 ? ((price - basePrice) / basePrice) * 100 : null;
+
+    // Only relevant when CHANGE_BASIS=session — API's 24h change, in basis points.
+    const change24h = tok.changes?.['24h']?.changePercent;
+    const sessionChange = change24h != null ? Number(change24h) / 100 : null;
+
+    out.push({
+      symbol: team.symbol,
+      price,
+      conference: normalizeConference(team.conference),
+      logo: team.logo || null,
+      allTimeChange,
+      sessionChange,
+    });
+  }
+  return out;
+}
+
+/* ============================================================
+   3. FETCH / STATE
+   ============================================================ */
+let lastGoodTeams = null; // never render an empty bar — hold last good on failure
+
+async function fetchPrices() {
+  const params = new URLSearchParams({
+    chainId: String(CONFIG.CHAIN_ID),
+    limit: '200',
+    offset: '0',
+    market: CONFIG.MARKET,
+  });
+  if (CONFIG.TOKEN) params.set('token', CONFIG.TOKEN);
+
+  const res = await fetch(`${CONFIG.INDEXER_BASE}/tokens?${params.toString()}`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error(`indexer responded ${res.status}`);
+  const json = await res.json();
+  return mapApiResponse(json);
+}
+
+async function refresh() {
+  try {
+    const teams = await fetchPrices();
+    if (teams.length === 0) throw new Error('empty response after mapping — check TEAM_BY_ADDRESS / adapter');
+    lastGoodTeams = teams;
+    setStale(false);
+    render(teams);
+    debugLog(teams, null);
+  } catch (err) {
+    setStale(true);
+    debugLog(lastGoodTeams, err);
+    // Deliberately do not touch the DOM here — last good tape stays on screen.
+  }
+}
+
+function setStale(isStale) {}
+
+/* ============================================================
+   4. RENDER
+   ============================================================ */
+function groupAndSort(teams) {
+  const byConf = new Map(CONFIG.CONFERENCE_ORDER.map(c => [c, []]));
+  for (const t of teams) {
+    if (byConf.has(t.conference)) byConf.get(t.conference).push(t);
+  }
+  for (const [, list] of byConf) {
+    list.sort((a, b) =>
+      CONFIG.SORT === 'symbol'
+        ? a.symbol.localeCompare(b.symbol)
+        : a.price - b.price
+    );
+  }
+  return byConf;
+}
+
+function fmtPrice(p) {
+  return `$${p.toFixed(2)}`;
+}
+
+function fmtDelta(pct) {
+  if (pct == null || !Number.isFinite(pct)) return '—';
+  const sign = pct > 0 ? '+' : '';
+  return `${sign}${pct.toFixed(1)}%`;
+}
+
+function buildItemEl(team) {
+  const el = document.createElement('div');
+  el.className = 'ticker-item';
+
+  if (!CONFIG.NO_LOGOS) {
+    const img = document.createElement('img');
+    img.className = 'logo';
+    img.src = team.logo || `${CONFIG.LOGO_BASE}${team.symbol}${CONFIG.LOGO_EXT}`;
+    img.alt = '';
+    img.onerror = () => {
+      const fallback = document.createElement('div');
+      fallback.className = 'logo-fallback';
+      fallback.textContent = team.symbol.slice(0, 3);
+      img.replaceWith(fallback);
+    };
+    el.appendChild(img);
+  }
+
+  const symbol = document.createElement('span');
+  symbol.className = 'symbol';
+  symbol.textContent = team.symbol;
+  el.appendChild(symbol);
+
+  const price = document.createElement('span');
+  price.className = 'price';
+  price.textContent = fmtPrice(team.price);
+  el.appendChild(price);
+
+  const delta = document.createElement('span');
+  const pct = CONFIG.CHANGE_BASIS === 'session' ? team.sessionChange : team.allTimeChange;
+  delta.className = 'delta ' + (pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat');
+  delta.textContent = fmtDelta(pct);
+  el.appendChild(delta);
+
+  return el;
+}
+
+function buildSegment(byConf) {
+  const frag = document.createDocumentFragment();
+  for (const conf of CONFIG.CONFERENCE_ORDER) {
+    const list = byConf.get(conf) || [];
+    if (list.length === 0) continue;
+    const label = document.createElement('div');
+    label.className = 'conf-label';
+
+    const logoUrl = CONFIG.CONFERENCE_LOGOS[conf];
+    if (!CONFIG.NO_LOGOS && logoUrl) {
+      const img = document.createElement('img');
+      img.className = 'conf-logo';
+      img.src = logoUrl;
+      img.alt = '';
+      img.onerror = () => img.remove(); // fall back to text-only label
+      label.appendChild(img);
+    }
+
+    const text = document.createElement('span');
+    text.textContent = conf;
+    label.appendChild(text);
+
+    frag.appendChild(label);
+    for (const team of list) frag.appendChild(buildItemEl(team));
+  }
+  return frag;
+}
+
+let animFrame = null;
+let trackOffset = 0;
+let segmentWidth = 0;
+
+function render(teams) {
+  const byConf = groupAndSort(teams);
+  const track = document.getElementById('tape-track');
+  const prevOffset = trackOffset % (segmentWidth || 1);
+
+  track.innerHTML = '';
+  // Two copies back-to-back so the loop has no visible seam; a third guards
+  // against a slow frame briefly exposing the gap on very wide viewports.
+  track.appendChild(buildSegment(byConf));
+  segmentWidth = track.scrollWidth;
+  track.appendChild(buildSegment(byConf));
+  track.appendChild(buildSegment(byConf));
+
+  // Preserve scroll position through a data refresh so the tape doesn't jump.
+  trackOffset = segmentWidth > 0 ? prevOffset : 0;
+}
+
+function animate(ts) {
+  if (!animate.last) animate.last = ts;
+  const dt = (ts - animate.last) / 1000;
+  animate.last = ts;
+
+  if (segmentWidth > 0) {
+    trackOffset += CONFIG.SPEED * dt;
+    if (trackOffset >= segmentWidth) trackOffset -= segmentWidth;
+    document.getElementById('tape-track').style.transform = `translateX(${-trackOffset}px)`;
+  }
+  animFrame = requestAnimationFrame(animate);
+}
+
+/* ============================================================
+   5. DEBUG
+   ============================================================ */
+function debugLog(teams, err) {
+  if (!CONFIG.DEBUG) return;
+  const panel = document.getElementById('debug-panel');
+  panel.style.display = 'block';
+
+  const lines = [`stak3holder-ticker — ${new Date().toLocaleTimeString()}`];
+  if (err) lines.push(`<span class="err">fetch error: ${escapeHtml(err.message)}</span>`);
+
+  if (teams) {
+    const byConf = groupAndSort(teams);
+    for (const conf of CONFIG.CONFERENCE_ORDER) {
+      const n = (byConf.get(conf) || []).length;
+      lines.push(`${conf}: ${n} teams`);
+    }
+    const missingConf = teams.filter(t => !CONFIG.CONFERENCE_ORDER.includes(t.conference));
+    if (missingConf.length) {
+      lines.push(`<span class="warn">${missingConf.length} teams with unrecognized conference: ${missingConf.map(t => t.symbol).join(', ')}</span>`);
+    }
+    const missingBasis = teams.filter(t => t.allTimeChange == null);
+    if (missingBasis.length) {
+      lines.push(`<span class="warn">${missingBasis.length} teams missing all-time basis: ${missingBasis.map(t => t.symbol).join(', ')}</span>`);
+    }
+  } else {
+    lines.push('<span class="warn">no data yet</span>');
+  }
+  panel.innerHTML = lines.join('\n');
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* ============================================================
+   6. BOOT
+   ============================================================ */
+refresh();
+setInterval(refresh, CONFIG.REFRESH_MS);
+animFrame = requestAnimationFrame(animate);
+</script>
+</body>
+</html>
